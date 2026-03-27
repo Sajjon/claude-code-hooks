@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Notification Hook - Sends Slack alerts when Claude needs user input.
+ * Notification Hook - Shows macOS alerts when Claude needs user input.
  * Logs to: ~/.claude/hooks-logs/YYYY-MM-DD.jsonl
  *
  * Setup in .claude/settings.json:
@@ -12,15 +12,11 @@
  *     }]
  *   }
  * }
- *
- * Environment: CCH_SLA_WEBHOOK (Slack webhook URL)
  */
 
 const fs = require('fs');
 const path = require('path');
-
-// Channel webhooks (Discord/Telegram coming soon)
-const SLACK_WEBHOOK = process.env.CCH_SLA_WEBHOOK || '';
+const { execFile } = require('child_process');
 
 const LOG_DIR = path.join(process.env.HOME, '.claude', 'hooks-logs');
 
@@ -55,7 +51,6 @@ function getEmoji(type) {
 
 function getTitle(type, message) {
   const msg = (message || '').toLowerCase();
-
   if (type === 'elicitation_dialog' || msg.includes('select') || msg.includes('choose') || msg.includes('which')) {
     return 'Claude needs your choice';
   }
@@ -71,54 +66,22 @@ function getTitle(type, message) {
 }
 
 function formatMessage(message) {
-  if (!message) return '_No details provided_';
+  if (!message) return 'No details provided';
   return message.length > 200 ? message.slice(0, 200) + '...' : message;
 }
 
-async function sendSlack(data, type) {
-  if (!SLACK_WEBHOOK) return { channel: 'slack', sent: false, reason: 'no webhook' };
-
-  const payload = {
-    blocks: [
-      {
-        type: 'header',
-        text: { type: 'plain_text', text: `${getEmoji(type)} ${getTitle(type, data.message)}`, emoji: true },
-      },
-      {
-        type: 'section',
-        fields: [
-          { type: 'mrkdwn', text: `*Project:*\n\`${getProjectName(data.cwd)}\`` },
-          { type: 'mrkdwn', text: `*Session:*\n\`${getShortSessionId(data.session_id)}\`` },
-        ],
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*Details:*\n${formatMessage(data.message)}` },
-      },
-      {
-        type: 'context',
-        elements: [
-          { type: 'mrkdwn', text: `📁 \`${data.cwd || 'unknown'}\`` },
-          { type: 'mrkdwn', text: `🕐 ${new Date().toLocaleTimeString()}` },
-        ],
-      },
-    ],
-  };
-
-  try {
-    const res = await fetch(SLACK_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+function showMacosNotification(message, title) {
+  return new Promise((resolve) => {
+    const script = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`;
+    execFile('osascript', ['-e', script], (error, _stdout, _stderr) => {
+      if (error) {
+        log({ level: 'WARN', msg: `osascript failed: ${error.message}` });
+        resolve({ sent: false, error: error.message });
+      } else {
+        resolve({ sent: true });
+      }
     });
-    return res.ok ? { channel: 'slack', sent: true } : { channel: 'slack', sent: false, error: `HTTP ${res.status}` };
-  } catch (e) {
-    return { channel: 'slack', sent: false, error: e.message };
-  }
-}
-
-async function sendAll(data, type) {
-  return Promise.all([sendSlack(data, type)]);
+  });
 }
 
 async function main() {
@@ -132,12 +95,12 @@ async function main() {
     log({ level: 'INPUT', notification_type: data.notification_type, message: data.message, session_id: data.session_id });
 
     const type = getNotificationType(data);
-    const results = await sendAll(data, type);
+    const title = `${getEmoji(type)} ${getTitle(type, data.message)}`;
+    const body = `[${getProjectName(data.cwd)} · ${getShortSessionId(data.session_id)}] ${formatMessage(data.message)}`;
 
-    const sent = results.filter(r => r.sent).map(r => r.channel);
-    const failed = results.filter(r => !r.sent && r.error);
+    const result = await showMacosNotification(body, title);
 
-    log({ level: sent.length ? 'SENT' : 'NONE', type, sent, failed, session_id: data.session_id });
+    log({ level: result.sent ? 'SENT' : 'NONE', type, session_id: data.session_id, ...(result.error && { error: result.error }) });
     console.log('{}');
   } catch (e) {
     log({ level: 'ERROR', error: e.message });
@@ -149,14 +112,12 @@ if (require.main === module) {
   main();
 } else {
   module.exports = {
-    SLACK_WEBHOOK,
     getNotificationType,
     getProjectName,
     getShortSessionId,
     getEmoji,
     getTitle,
     formatMessage,
-    sendSlack,
-    sendAll,
+    showMacosNotification,
   };
 }
